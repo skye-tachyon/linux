@@ -25,6 +25,7 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/tqueue.h>
+#include <linux/resource.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -42,6 +43,7 @@ volatile struct timeval xtime;		/* The current time */
 int tickadj = 500/HZ;			/* microsecs */
 
 DECLARE_TASK_QUEUE(tq_timer);
+DECLARE_TASK_QUEUE(tq_immediate);
 
 /*
  * phase-lock loop variables
@@ -62,6 +64,7 @@ long time_adjust = 0;
 long time_adjust_step = 0;
 
 int need_resched = 0;
+unsigned long event = 0;
 
 /*
  * Tell us the machine setup..
@@ -70,6 +73,7 @@ int hard_math = 0;		/* set by boot/head.S */
 int x86 = 0;			/* set by boot/head.S to 3 or 4 */
 int ignore_irq13 = 0;		/* set if exception 16 works */
 int wp_works_ok = 0;		/* set if paging hardware honours WP */ 
+int hlt_works_ok = 1;		/* set if the "hlt" instruction works */
 
 /*
  * Bus types ..
@@ -88,6 +92,7 @@ extern int timer_interrupt(void);
 asmlinkage int system_call(void);
 
 static unsigned long init_kernel_stack[1024] = { STACK_MAGIC, };
+static struct vm_area_struct init_mmap = INIT_MMAP;
 struct task_struct init_task = INIT_TASK;
 
 unsigned long volatile jiffies=0;
@@ -148,7 +153,6 @@ asmlinkage void math_emulate(long arg)
 
 unsigned long itimer_ticks = 0;
 unsigned long itimer_next = ~0;
-static unsigned long lost_ticks = 0;
 
 /*
  *  'schedule()' is the scheduler function. It's a very simple and nice
@@ -160,7 +164,7 @@ static unsigned long lost_ticks = 0;
  * information in task[0] is never used.
  *
  * The "confuse_gcc" goto is used only to get better assembly code..
- * Djikstra probably hates me.
+ * Dijkstra probably hates me.
  */
 asmlinkage void schedule(void)
 {
@@ -279,12 +283,13 @@ void wake_up(struct wait_queue **q)
 			if ((p->state == TASK_UNINTERRUPTIBLE) ||
 			    (p->state == TASK_INTERRUPTIBLE)) {
 				p->state = TASK_RUNNING;
-				if (p->counter > current->counter)
+				if (p->counter > current->counter + 3)
 					need_resched = 1;
 			}
 		}
 		if (!tmp->next) {
-			printk("wait_queue is bad (eip = %08lx)\n",((unsigned long *) q)[-1]);
+			printk("wait_queue is bad (eip = %p)\n",
+				__builtin_return_address(0));
 			printk("        q = %p\n",q);
 			printk("       *q = %p\n",*q);
 			printk("      tmp = %p\n",tmp);
@@ -305,12 +310,13 @@ void wake_up_interruptible(struct wait_queue **q)
 		if ((p = tmp->task) != NULL) {
 			if (p->state == TASK_INTERRUPTIBLE) {
 				p->state = TASK_RUNNING;
-				if (p->counter > current->counter)
+				if (p->counter > current->counter + 3)
 					need_resched = 1;
 			}
 		}
 		if (!tmp->next) {
-			printk("wait_queue is bad (eip = %08lx)\n",((unsigned long *) q)[-1]);
+			printk("wait_queue is bad (eip = %p)\n",
+				__builtin_return_address(0));
 			printk("        q = %p\n",q);
 			printk("       *q = %p\n",*q);
 			printk("      tmp = %p\n",tmp);
@@ -361,54 +367,77 @@ void sleep_on(struct wait_queue **p)
 	__sleep_on(p,TASK_UNINTERRUPTIBLE);
 }
 
-static struct timer_list * next_timer = NULL;
+/*
+ * The head for the timer-list has a "expires" field of MAX_UINT,
+ * and the sorting routine counts on this..
+ */
+static struct timer_list timer_head = { &timer_head, &timer_head, ~0, 0, NULL };
+#define SLOW_BUT_DEBUGGING_TIMERS 1
 
 void add_timer(struct timer_list * timer)
 {
 	unsigned long flags;
-	struct timer_list ** p;
+	struct timer_list *p;
 
-	if (!timer)
+#if SLOW_BUT_DEBUGGING_TIMERS
+	if (timer->next || timer->prev) {
+		printk("add_timer() called with non-zero list from %p\n",
+			__builtin_return_address(0));
 		return;
-	timer->next = NULL;
-	p = &next_timer;
+	}
+#endif
+	p = &timer_head;
+	timer->expires += jiffies;
 	save_flags(flags);
 	cli();
-	while (*p) {
-		if ((*p)->expires > timer->expires) {
-			(*p)->expires -= timer->expires;
-			timer->next = *p;
-			break;
-		}
-		timer->expires -= (*p)->expires;
-		p = &(*p)->next;
-	}
-	*p = timer;
+	do {
+		p = p->next;
+	} while (timer->expires > p->expires);
+	timer->next = p;
+	timer->prev = p->prev;
+	p->prev = timer;
+	timer->prev->next = timer;
 	restore_flags(flags);
 }
 
 int del_timer(struct timer_list * timer)
 {
 	unsigned long flags;
-	unsigned long expires = 0;
-	struct timer_list **p;
+#if SLOW_BUT_DEBUGGING_TIMERS
+	struct timer_list * p;
 
-	p = &next_timer;
+	p = &timer_head;
 	save_flags(flags);
 	cli();
-	while (*p) {
-		if (*p == timer) {
-			if ((*p = timer->next) != NULL)
-				(*p)->expires += timer->expires;
-			timer->expires += expires;
+	while ((p = p->next) != &timer_head) {
+		if (p == timer) {
+			timer->next->prev = timer->prev;
+			timer->prev->next = timer->next;
+			timer->next = timer->prev = NULL;
 			restore_flags(flags);
+			timer->expires -= jiffies;
 			return 1;
 		}
-		expires += (*p)->expires;
-		p = &(*p)->next;
+	}
+	if (timer->next || timer->prev)
+		printk("del_timer() called from %p with timer not initialized\n",
+			__builtin_return_address(0));
+	restore_flags(flags);
+	return 0;
+#else	
+	save_flags(flags);
+	cli();
+	if (timer->next) {
+		timer->next->prev = timer->prev;
+		timer->prev->next = timer->next;
+		timer->next = timer->prev = NULL;
+		restore_flags(flags);
+		timer->expires -= jiffies;
+		return 1;
 	}
 	restore_flags(flags);
 	return 0;
+#endif
 }
 
 unsigned long timer_active = 0;
@@ -517,6 +546,8 @@ static void second_overflow(void)
 	if (xtime.tv_sec > last_rtc_update + 660)
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
+	  else
+	    last_rtc_update = xtime.tv_sec - 600; /* do it again in one min */
 }
 
 /*
@@ -526,12 +557,15 @@ static void timer_bh(void * unused)
 {
 	unsigned long mask;
 	struct timer_struct *tp;
+	struct timer_list * timer;
 
 	cli();
-	while (next_timer && next_timer->expires == 0) {
-		void (*fn)(unsigned long) = next_timer->function;
-		unsigned long data = next_timer->data;
-		next_timer = next_timer->next;
+	while ((timer = timer_head.next) != &timer_head && timer->expires < jiffies) {
+		void (*fn)(unsigned long) = timer->function;
+		unsigned long data = timer->data;
+		timer->next->prev = timer->prev;
+		timer->prev->next = timer->next;
+		timer->next = timer->prev = NULL;
 		sti();
 		fn(data);
 		cli();
@@ -556,6 +590,11 @@ void tqueue_bh(void * unused)
 	run_task_queue(&tq_timer);
 }
 
+void immediate_bh(void * unused)
+{
+	run_task_queue(&tq_immediate);
+}
+
 /*
  * The int argument is really a (struct pt_regs *), in case the
  * interrupt wants to know from where it was called. The timer
@@ -567,7 +606,7 @@ static void do_timer(struct pt_regs * regs)
 	unsigned long mask;
 	struct timer_struct *tp;
 
-	long ltemp;
+	long ltemp, psecs;
 
 	/* Advance the phase, once it gets to one microsecond, then
 	 * advance the tick more.
@@ -643,6 +682,24 @@ static void do_timer(struct pt_regs * regs)
 		}
 #endif
 	}
+	/*
+	 * check the cpu time limit on the process.
+	 */
+	if ((current->rlim[RLIMIT_CPU].rlim_max != RLIM_INFINITY) &&
+	    (((current->stime + current->utime) / HZ) >= current->rlim[RLIMIT_CPU].rlim_max))
+		send_sig(SIGKILL, current, 1);
+	if ((current->rlim[RLIMIT_CPU].rlim_cur != RLIM_INFINITY) &&
+	    (((current->stime + current->utime) % HZ) == 0)) {
+		psecs = (current->stime + current->utime) / HZ;
+		/* send when equal */
+		if (psecs == current->rlim[RLIMIT_CPU].rlim_cur)
+			send_sig(SIGXCPU, current, 1);
+		/* and every five seconds thereafter. */
+		else if ((psecs > current->rlim[RLIMIT_CPU].rlim_cur) &&
+		        ((psecs - current->rlim[RLIMIT_CPU].rlim_cur) % 5) == 0)
+			send_sig(SIGXCPU, current, 1);
+	}
+
 	if (current != task[0] && 0 > --current->counter) {
 		current->counter = 0;
 		need_resched = 1;
@@ -665,16 +722,8 @@ static void do_timer(struct pt_regs * regs)
 	itimer_ticks++;
 	if (itimer_ticks > itimer_next)
 		need_resched = 1;
-	if (next_timer) {
-		if (next_timer->expires) {
-			next_timer->expires--;
-			if (!next_timer->expires)
-				mark_bh(TIMER_BH);
-		} else {
-			lost_ticks++;
-			mark_bh(TIMER_BH);
-		}
-	}
+	if (timer_head.next->expires < jiffies)
+		mark_bh(TIMER_BH);
 	if (tq_timer != &tq_last)
 		mark_bh(TQUEUE_BH);
 	sti();
@@ -787,6 +836,7 @@ void sched_init(void)
 
 	bh_base[TIMER_BH].routine = timer_bh;
 	bh_base[TQUEUE_BH].routine = tqueue_bh;
+	bh_base[IMMEDIATE_BH].routine = immediate_bh;
 	if (sizeof(struct sigaction) != 16)
 		panic("Struct sigaction MUST be 16 bytes");
 	set_tss_desc(gdt+FIRST_TSS_ENTRY,&init_task.tss);
@@ -807,6 +857,6 @@ void sched_init(void)
 	outb_p(0x34,0x43);		/* binary, mode 2, LSB/MSB, ch 0 */
 	outb_p(LATCH & 0xff , 0x40);	/* LSB */
 	outb(LATCH >> 8 , 0x40);	/* MSB */
-	if (request_irq(TIMER_IRQ,(void (*)(int)) do_timer)!=0)
+	if (request_irq(TIMER_IRQ,(void (*)(int)) do_timer, 0, "timer") != 0)
 		panic("Could not allocate timer IRQ!");
 }

@@ -17,7 +17,6 @@
 #include <linux/malloc.h>
 
 #include <asm/segment.h>
-extern void shm_exit (void);
 extern void sem_exit (void);
 
 int getrusage(struct task_struct *, int, struct rusage *);
@@ -121,7 +120,7 @@ int bad_task_ptr(struct task_struct *p)
 }
 	
 /*
- * This routine scans the pid tree and make sure the rep invarient still
+ * This routine scans the pid tree and makes sure the rep invariant still
  * holds.  Used for debugging only, since it's very slow....
  *
  * It looks a lot scarier than it really is.... we're doing nothing more
@@ -198,7 +197,7 @@ void audit_ptree(void)
 
 /*
  * This checks not only the pgrp, but falls back on the pid if no
- * satisfactory prgp is found. I dunno - gdb doesn't work correctly
+ * satisfactory pgrp is found. I dunno - gdb doesn't work correctly
  * without this...
  */
 int session_of_pgrp(int pgrp)
@@ -365,6 +364,8 @@ static void exit_mm(void)
 		struct vm_area_struct * next = mpnt->vm_next;
 		if (mpnt->vm_ops && mpnt->vm_ops->close)
 			mpnt->vm_ops->close(mpnt);
+		if (mpnt->vm_inode)
+			iput(mpnt->vm_inode);
 		kfree(mpnt);
 		mpnt = next;
 	}
@@ -398,8 +399,6 @@ static void exit_fs(void)
 	current->fs->pwd = NULL;
 	iput(current->fs->root);
 	current->fs->root = NULL;
-	iput(current->executable);
-	current->executable = NULL;
 }
 
 NORET_TYPE void do_exit(long code)
@@ -411,10 +410,8 @@ NORET_TYPE void do_exit(long code)
 		intr_count = 0;
 	}
 fake_volatile:
-	if (current->semun)
+	if (current->semundo)
 		sem_exit();
-	if (current->shm)
-		shm_exit();
 	exit_mm();
 	exit_files();
 	exit_fs();
@@ -483,6 +480,10 @@ fake_volatile:
 #ifdef DEBUG_PROC_TREE
 	audit_ptree();
 #endif
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)--;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)--;
 	schedule();
 /*
  * In order to get rid of the "volatile function does return" message

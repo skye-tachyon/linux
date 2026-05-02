@@ -32,7 +32,6 @@ asmlinkage void ret_from_sys_call(void) __asm__("ret_from_sys_call");
 #define MAX_TASKS_PER_USER (NR_TASKS/2)
 #define MIN_TASKS_LEFT_FOR_ROOT 4
 
-extern int shm_fork(struct task_struct *, struct task_struct *);
 long last_pid=0;
 
 static int find_empty_process(void)
@@ -94,7 +93,6 @@ static int dup_mmap(struct task_struct * tsk)
 	struct vm_area_struct * mpnt, **p, *tmp;
 
 	tsk->mm->mmap = NULL;
-	tsk->mm->stk_vma = NULL;
 	p = &tsk->mm->mmap;
 	for (mpnt = current->mm->mmap ; mpnt ; mpnt = mpnt->vm_next) {
 		tmp = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
@@ -105,10 +103,10 @@ static int dup_mmap(struct task_struct * tsk)
 		tmp->vm_next = NULL;
 		if (tmp->vm_inode)
 			tmp->vm_inode->i_count++;
+		if (tmp->vm_ops && tmp->vm_ops->open)
+			tmp->vm_ops->open(tmp);
 		*p = tmp;
 		p = &tmp->vm_next;
-		if (current->mm->stk_vma == mpnt)
-			tsk->mm->stk_vma = tmp;
 	}
 	return 0;
 }
@@ -144,13 +142,12 @@ static int copy_mm(unsigned long clone_flags, struct task_struct * p)
 		p->mm->cmin_flt = p->mm->cmaj_flt = 0;
 		if (copy_page_tables(p))
 			return 1;
-		dup_mmap(p);
+		return dup_mmap(p);
 	} else {
 		if (clone_page_tables(p))
 			return 1;
-		dup_mmap(p);		/* wrong.. */
+		return dup_mmap(p);		/* wrong.. */
 	}
-	return 0;
 }
 
 static void copy_fs(unsigned long clone_flags, struct task_struct * p)
@@ -159,8 +156,6 @@ static void copy_fs(unsigned long clone_flags, struct task_struct * p)
 		current->fs->pwd->i_count++;
 	if (current->fs->root)
 		current->fs->root->i_count++;
-	if (current->executable)
-		current->executable->i_count++;
 }
 
 #define IS_CLONE (regs.orig_eax == __NR_clone)
@@ -184,6 +179,12 @@ asmlinkage int sys_fork(struct pt_regs regs)
 		goto bad_fork_free;
 	task[nr] = p;
 	*p = *current;
+
+	if (p->exec_domain && p->exec_domain->use_count)
+		(*p->exec_domain->use_count)++;
+	if (p->binfmt && p->binfmt->use_count)
+		(*p->binfmt->use_count)++;
+
 	p->did_exec = 0;
 	p->kernel_stack_page = 0;
 	p->state = TASK_UNINTERRUPTIBLE;
@@ -240,9 +241,9 @@ asmlinkage int sys_fork(struct pt_regs regs)
 		p->tss.io_bitmap[i] = ~0;
 	if (last_task_used_math == current)
 		__asm__("clts ; fnsave %0 ; frstor %0":"=m" (p->tss.i387));
-	p->semun = NULL; p->shm = NULL;
-	if (copy_mm(clone_flags, p) || shm_fork(current, p))
+	if (copy_mm(clone_flags, p))
 		goto bad_fork_cleanup;
+	p->semundo = NULL;
 	copy_files(clone_flags, p);
 	copy_fs(clone_flags, p);
 	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));

@@ -7,7 +7,7 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-SUBDIRS = minix ext ext2 msdos proc isofs nfs xiafs hpfs sysv
+SUBDIRS = minix ext ext2 msdos proc isofs nfs xiafs umsdos hpfs sysv
 
 ifdef CONFIG_MINIX_FS
 FS_SUBDIRS := $(FS_SUBDIRS) minix
@@ -20,6 +20,8 @@ FS_SUBDIRS := $(FS_SUBDIRS) ext2
 endif
 ifdef CONFIG_MSDOS_FS
 FS_SUBDIRS := $(FS_SUBDIRS) msdos
+else
+MODULE_FS_SUBDIRS := $(MODULE_FS_SUBDIRS) msdos
 endif
 ifdef CONFIG_PROC_FS
 FS_SUBDIRS := $(FS_SUBDIRS) proc
@@ -33,6 +35,11 @@ endif
 ifdef CONFIG_XIA_FS
 FS_SUBDIRS := $(FS_SUBDIRS) xiafs
 endif
+ifdef CONFIG_UMSDOS_FS
+FS_SUBDIRS := $(FS_SUBDIRS) umsdos
+else
+MODULE_FS_SUBDIRS := $(MODULE_FS_SUBDIRS) umsdos
+endif
 ifdef CONFIG_SYSV_FS
 FS_SUBDIRS := $(FS_SUBDIRS) sysv
 endif
@@ -42,9 +49,8 @@ endif
 
 ifdef CONFIG_BINFMT_ELF
 BINFMTS := $(BINFMTS) binfmt_elf.o
-endif
-ifdef CONFIG_BINFMT_COFF
-BINFMTS := $(BINFMTS) binfmt_coff.o
+else
+MODULES := $(MODULES) binfmt_elf.o
 endif
 
 .c.s:
@@ -56,9 +62,9 @@ endif
 
 OBJS=	open.o read_write.o inode.o devices.o file_table.o buffer.o super.o \
 	block_dev.o stat.o exec.o pipe.o namei.o fcntl.o ioctl.o \
-	select.o fifo.o locks.o filesystems.o $(BINFMTS)
+	select.o fifo.o locks.o filesystems.o dcache.o $(BINFMTS)
 
-all: fs.o filesystems.a
+all: fs.o filesystems.a modules
 
 fs.o: $(OBJS)
 	$(LD) -r -o fs.o $(OBJS)
@@ -68,6 +74,22 @@ filesystems.a: dummy
 	set -e; for i in $(FS_SUBDIRS); do \
 	  test ! -d $$i || \
 	    { $(MAKE) -C $$i; $(AR) rcs filesystems.a $$i/$$i.o; }; done
+
+ifdef MODULES
+
+modules:
+	$(MAKE) CFLAGS="$(CFLAGS) -DMODULE" $(MODULES)
+	(cd ../modules;for i in $(MODULES); do ln -sf ../fs/$$i .; done)
+	set -e; for i in $(MODULE_FS_SUBDIRS); do \
+	  test ! -d $$i || \
+	    { $(MAKE) -C $$i; }; done
+
+
+else
+
+modules:
+
+endif
 
 depend dep:
 	$(CPP) -M *.c > .depend

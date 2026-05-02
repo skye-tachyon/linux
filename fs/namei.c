@@ -20,6 +20,35 @@
 #define ACC_MODE(x) ("\000\004\002\006"[(x)&O_ACCMODE])
 
 /*
+ * How long a filename can we get from user space?
+ *  -EFAULT if invalid area
+ *  0 if ok (ENAMETOOLONG before EFAULT)
+ *  >0 EFAULT after xx bytes
+ */
+static inline int get_max_filename(unsigned long address)
+{
+	struct vm_area_struct * vma;
+
+	if (get_fs() == KERNEL_DS)
+		return 0;
+	for (vma = current->mm->mmap ; ; vma = vma->vm_next) {
+		if (!vma)
+			return -EFAULT;
+		if (vma->vm_end > address)
+			break;
+	}
+	if (vma->vm_start > address || !(vma->vm_page_prot & PAGE_USER))
+		return -EFAULT;
+	address = vma->vm_end - address;
+	if (address > PAGE_SIZE)
+		return 0;
+	if (vma->vm_next && vma->vm_next->vm_start == vma->vm_end &&
+	   (vma->vm_next->vm_page_prot & PAGE_USER))
+		return 0;
+	return address;
+}
+
+/*
  * In order to reduce some races, while at the same time doing additional
  * checking and hopefully speeding things up, we copy filenames to the
  * kernel data space before using them..
@@ -28,18 +57,17 @@
  */
 int getname(const char * filename, char **result)
 {
-	int error;
-	unsigned long i, page;
+	int i, error;
+	unsigned long page;
 	char * tmp, c;
 
-	i = (unsigned long) filename;
-	if (!i || i >= TASK_SIZE)
-		return -EFAULT;
-	i = TASK_SIZE - i;
+	i = get_max_filename((unsigned long) filename);
+	if (i < 0)
+		return i;
 	error = -EFAULT;
-	if (i > PAGE_SIZE) {
-		i = PAGE_SIZE;
+	if (!i) {
 		error = -ENAMETOOLONG;
+		i = PAGE_SIZE;
 	}
 	c = get_fs_byte(filename++);
 	if (!c)
@@ -68,8 +96,9 @@ void putname(char * name)
  *	permission()
  *
  * is used to check for read/write/execute permissions on a file.
- * I don't know if we should look at just the euid or both euid and
- * uid, but that should be easily changed.
+ * We use "fsuid" for this, letting us set arbitrary permissions
+ * for filesystem access without changing the "normal" uids which
+ * are used for other things..
  */
 int permission(struct inode * inode,int mask)
 {
@@ -77,13 +106,47 @@ int permission(struct inode * inode,int mask)
 
 	if (inode->i_op && inode->i_op->permission)
 		return inode->i_op->permission(inode, mask);
-	else if (current->euid == inode->i_uid)
+	else if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
+		return 0; /* Nobody gets write access to an immutable file */
+	else if (current->fsuid == inode->i_uid)
 		mode >>= 6;
 	else if (in_group_p(inode->i_gid))
 		mode >>= 3;
-	if (((mode & mask & 0007) == mask) || suser())
+	if (((mode & mask & 0007) == mask) || fsuser())
 		return 1;
 	return 0;
+}
+
+/*
+ * get_write_access() gets write permission for a file.
+ * put_write_access() releases this write permission.
+ * This is used for regular files.
+ * We cannot support write (and maybe mmap read-write shared) accesses and
+ * MAP_DENYWRITE mmapings simultaneously.
+ */
+int get_write_access(struct inode * inode)
+{
+	struct task_struct ** p;
+
+	if ((inode->i_count > 1) && S_ISREG(inode->i_mode)) /* shortcut */
+		for (p = &LAST_TASK ; p > &FIRST_TASK ; --p) {
+		        struct vm_area_struct * mpnt;
+			if (!*p)
+				continue;
+			for(mpnt = (*p)->mm->mmap; mpnt; mpnt = mpnt->vm_next) {
+				if (inode != mpnt->vm_inode)
+					continue;
+				if (mpnt->vm_flags & VM_DENYWRITE)
+					return -ETXTBSY;
+			}
+		}
+	inode->i_wcount++;
+	return 0;
+}
+
+void put_write_access(struct inode * inode)
+{
+	inode->i_wcount--;
 }
 
 /*
@@ -277,7 +340,6 @@ int open_namei(const char * pathname, int flag, int mode,
 	const char * basename;
 	int namelen,error;
 	struct inode * dir, *inode;
-	struct task_struct ** p;
 
 	mode &= S_IALLUGO & ~current->fs->umask;
 	mode |= S_IFREG;
@@ -342,40 +404,39 @@ int open_namei(const char * pathname, int flag, int mode,
 			iput(inode);
 			return -EACCES;
 		}
+		flag &= ~O_TRUNC;
 	} else {
 		if (IS_RDONLY(inode) && (flag & 2)) {
 			iput(inode);
 			return -EROFS;
 		}
 	}
- 	if ((inode->i_count > 1) && (flag & 2)) {
- 		for (p = &LAST_TASK ; p > &FIRST_TASK ; --p) {
-		        struct vm_area_struct * mpnt;
- 			if (!*p)
- 				continue;
- 			if (inode == (*p)->executable) {
- 				iput(inode);
- 				return -ETXTBSY;
- 			}
-			for(mpnt = (*p)->mm->mmap; mpnt; mpnt = mpnt->vm_next) {
-				if (mpnt->vm_page_prot & PAGE_RW)
-					continue;
-				if (inode == mpnt->vm_inode) {
-					iput(inode);
-					return -ETXTBSY;
-				}
-			}
- 		}
- 	}
+	/*
+	 * An append-only file must be opened in append mode for writing
+	 */
+	if (IS_APPEND(inode) && ((flag & 2) && !(flag & O_APPEND))) {
+		iput(inode);
+		return -EPERM;
+	}
 	if (flag & O_TRUNC) {
-	      inode->i_size = 0;
-	      if (inode->i_op && inode->i_op->truncate)
-	           inode->i_op->truncate(inode);
-	      if ((error = notify_change(NOTIFY_SIZE, inode))) {
-		   iput(inode);
-		   return error;
-	      }
-	      inode->i_dirt = 1;
+		struct iattr newattrs;
+
+		if ((error = get_write_access(inode))) {
+			iput(inode);
+			return error;
+		}
+		newattrs.ia_size = 0;
+		newattrs.ia_valid = ATTR_SIZE;
+		if ((error = notify_change(inode, &newattrs))) {
+			put_write_access(inode);
+			iput(inode);
+			return error;
+		}
+		inode->i_size = 0;
+		if (inode->i_op && inode->i_op->truncate)
+			inode->i_op->truncate(inode);
+		inode->i_dirt = 1;
+		put_write_access(inode);
 	}
 	*res_inode = inode;
 	return 0;
@@ -420,7 +481,7 @@ asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev)
 	int error;
 	char * tmp;
 
-	if (S_ISDIR(mode) || (!S_ISFIFO(mode) && !suser()))
+	if (S_ISDIR(mode) || (!S_ISFIFO(mode) && !fsuser()))
 		return -EPERM;
 	switch (mode & S_IFMT) {
 	case 0:
@@ -506,6 +567,13 @@ static int do_rmdir(const char * name)
 		iput(dir);
 		return -EACCES;
 	}
+	/*
+	 * A subdirectory cannot be removed from an append-only directory
+	 */
+	if (IS_APPEND(dir)) {
+		iput(dir);
+		return -EPERM;
+	}
 	if (!dir->i_op || !dir->i_op->rmdir) {
 		iput(dir);
 		return -EPERM;
@@ -546,6 +614,13 @@ static int do_unlink(const char * name)
 	if (!permission(dir,MAY_WRITE | MAY_EXEC)) {
 		iput(dir);
 		return -EACCES;
+	}
+	/*
+	 * A file cannot be removed from an append-only directory
+	 */
+	if (IS_APPEND(dir)) {
+		iput(dir);
+		return -EPERM;
 	}
 	if (!dir->i_op || !dir->i_op->unlink) {
 		iput(dir);
@@ -648,6 +723,14 @@ static int do_link(struct inode * oldinode, const char * newname)
 		iput(oldinode);
 		return -EACCES;
 	}
+	/*
+	 * A link to an append-only or immutable file cannot be created
+	 */
+	if (IS_APPEND(oldinode) || IS_IMMUTABLE(oldinode)) {
+		iput(dir);
+		iput(oldinode);
+		return -EPERM;
+	}
 	if (!dir->i_op || !dir->i_op->link) {
 		iput(dir);
 		iput(oldinode);
@@ -725,6 +808,14 @@ static int do_rename(const char * oldname, const char * newname)
 		iput(old_dir);
 		iput(new_dir);
 		return -EROFS;
+	}
+	/*
+	 * A file cannot be removed from an append-only directory
+	 */
+	if (IS_APPEND(old_dir)) {
+		iput(old_dir);
+		iput(new_dir);
+		return -EPERM;
 	}
 	if (!old_dir->i_op || !old_dir->i_op->rename) {
 		iput(old_dir);

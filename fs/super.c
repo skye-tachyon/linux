@@ -20,7 +20,7 @@
 
 #include <asm/system.h>
 #include <asm/segment.h>
-
+#include <asm/bitops.h>
  
 extern struct file_operations * get_blkfops(unsigned int);
 extern struct file_operations * get_chrfops(unsigned int);
@@ -295,23 +295,15 @@ static struct super_block * read_super(dev_t dev,char *name,int flags,
  * filesystems which don't use real block-devices.  -- jrs
  */
 
-static char unnamed_dev_in_use[256];
+static char unnamed_dev_in_use[256/8] = { 0, };
 
 static dev_t get_unnamed_dev(void)
 {
-	static int first_use = 0;
 	int i;
 
-	if (first_use == 0) {
-		first_use = 1;
-		memset(unnamed_dev_in_use, 0, sizeof(unnamed_dev_in_use));
-		unnamed_dev_in_use[0] = 1; /* minor 0 (nodev) is special */
-	}
-	for (i = 0; i < sizeof unnamed_dev_in_use/sizeof unnamed_dev_in_use[0]; i++) {
-		if (!unnamed_dev_in_use[i]) {
-			unnamed_dev_in_use[i] = 1;
+	for (i = 1; i < 256; i++) {
+		if (!set_bit(i,unnamed_dev_in_use))
 			return (UNNAMED_MAJOR << 8) | i;
-		}
 	}
 	return 0;
 }
@@ -320,12 +312,11 @@ static void put_unnamed_dev(dev_t dev)
 {
 	if (!dev)
 		return;
-	if (!unnamed_dev_in_use[dev]) {
-		printk("VFS: put_unnamed_dev: freeing unused device %d/%d\n",
-							MAJOR(dev), MINOR(dev));
+	if (MAJOR(dev) == UNNAMED_MAJOR &&
+	    clear_bit(MINOR(dev), unnamed_dev_in_use))
 		return;
-	}
-	unnamed_dev_in_use[dev] = 0;
+	printk("VFS: put_unnamed_dev: freeing unused device %d/%d\n",
+			MAJOR(dev), MINOR(dev));
 }
 
 static int do_umount(dev_t dev)
@@ -478,6 +469,9 @@ static int do_remount_sb(struct super_block *sb, int flags, char *data)
 {
 	int retval;
 	
+	if (!(flags & MS_RDONLY ) && sb->s_dev && is_read_only(sb->s_dev))
+		return -EACCES;
+		/*flags |= MS_RDONLY;*/
 	/* If we are remounting RDONLY, make sure there are no rw files open */
 	if ((flags & MS_RDONLY) && !(sb->s_flags & MS_RDONLY))
 		if (!fs_may_remount_ro(sb->s_dev))
@@ -610,7 +604,11 @@ asmlinkage int sys_mount(char * dev_name, char * dir_name, char * type,
 	}
 	fops = get_blkfops(MAJOR(dev));
 	if (fops && fops->open) {
-		retval = fops->open(inode,NULL);
+		struct file dummy;	/* allows read-write or read-only flag */
+		memset(&dummy, 0, sizeof(dummy));
+		dummy.f_inode = inode;
+		dummy.f_mode = (new_flags & MS_RDONLY) ? 1 : 3;
+		retval = fops->open(inode, &dummy);
 		if (retval) {
 			iput(inode);
 			return retval;
@@ -628,7 +626,7 @@ asmlinkage int sys_mount(char * dev_name, char * dir_name, char * type,
 	retval = do_mount(dev,dir_name,t,flags,(void *) page);
 	free_page(page);
 	if (retval && fops && fops->release)
-		fops->release(inode,NULL);
+		fops->release(inode, NULL);
 	iput(inode);
 	return retval;
 }
@@ -637,7 +635,9 @@ void mount_root(void)
 {
 	struct file_system_type * fs_type;
 	struct super_block * sb;
-	struct inode * inode;
+	struct inode * inode, d_inode;
+	struct file filp;
+	int retval;
 
 	memset(super_blocks, 0, sizeof(super_blocks));
 	fcntl_init_locks();
@@ -645,7 +645,25 @@ void mount_root(void)
 		printk(KERN_NOTICE "VFS: Insert root floppy and press ENTER\n");
 		wait_for_keypress();
 	}
+
+	memset(&filp, 0, sizeof(filp));
+	memset(&d_inode, 0, sizeof(d_inode));
+	d_inode.i_rdev = ROOT_DEV;
+	filp.f_inode = &d_inode;
+	if ( root_mountflags & MS_RDONLY)
+		filp.f_mode = 1; /* read only */
+	else
+		filp.f_mode = 3; /* read write */
+	retval = blkdev_open(&d_inode, &filp);
+	if(retval == -EROFS){
+		root_mountflags |= MS_RDONLY;
+		filp.f_mode = 1;
+		retval = blkdev_open(&d_inode, &filp);
+	}
+
 	for (fs_type = file_systems ; fs_type ; fs_type = fs_type->next) {
+		if(retval)
+			break;
 		if (!fs_type->requires_dev)
 			continue;
 		sb = read_super(ROOT_DEV,fs_type->name,root_mountflags,NULL,1);
@@ -662,5 +680,6 @@ void mount_root(void)
 			return;
 		}
 	}
-	panic("VFS: Unable to mount root");
+	panic("VFS: Unable to mount root fs on %02x:%02x",
+		MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
 }

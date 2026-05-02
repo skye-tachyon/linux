@@ -29,22 +29,6 @@
 #include <asm/segment.h>
 #include <asm/io.h>
 
-#ifdef CONFIG_SCSI
-#ifdef CONFIG_BLK_DEV_SR
-extern int check_cdrom_media_change(int, int);
-#endif
-#ifdef CONFIG_BLK_DEV_SD
-extern int check_scsidisk_media_change(int, int);
-extern int revalidate_scsidisk(int, int);
-#endif
-#endif
-#ifdef CONFIG_CDU31A
-extern int check_cdu31a_media_change(int, int);
-#endif
-#ifdef CONFIG_MCD
-extern int check_mcd_media_change(int, int);
-#endif
-
 #define NR_SIZES 4
 static char buffersize_index[9] = {-1,  0,  1, -1,  2, -1, -1, -1, 3};
 static short int bufferindex_size[NR_SIZES] = {512, 1024, 2048, 4096};
@@ -72,7 +56,6 @@ int buffers_lav[NR_SIZES] = {0,};  /* Load average of buffer usage */
 int nr_free[NR_SIZES] = {0,};
 int buffermem = 0;
 int nr_buffer_heads = 0;
-static int min_free_pages = 20;	/* nr free pages needed before buffer grows */
 extern int *blksize_size[];
 
 /* Here is the parameter block for the bdflush process. */
@@ -163,6 +146,7 @@ static int sync_buffers(dev_t dev, int wait)
 	   2) wait for completion by waiting for all buffers to unlock. */
  repeat:
 	retry = 0;
+ repeat2:
 	ncount = 0;
 	/* We search all lists as a failsafe mechanism, not because we expect
 	   there to be dirty buffers on any of the other lists. */
@@ -186,6 +170,7 @@ static int sync_buffers(dev_t dev, int wait)
 					  continue;
 				  }
 				  wait_on_buffer (bh);
+				  goto repeat2;
 			  }
 			 /* If an unlocked buffer is not uptodate, there has
 			     been an IO error. Skip it. */
@@ -199,6 +184,9 @@ static int sync_buffers(dev_t dev, int wait)
 			    on the third pass. */
 			 if (!bh->b_dirt || pass>=2)
 				  continue;
+			 /* don't bother about locked buffers */
+			 if (bh->b_lock)
+				 continue;
 			 bh->b_count++;
 			 bh->b_flushtime = 0;
 			 ll_rw_block(WRITE, 1, &bh);
@@ -281,79 +269,6 @@ void invalidate_buffers(dev_t dev)
 					  bh->b_dirt = bh->b_req = 0;
 		}
 	}
-}
-
-/*
- * This routine checks whether a floppy has been changed, and
- * invalidates all buffer-cache-entries in that case. This
- * is a relatively slow routine, so we have to try to minimize using
- * it. Thus it is called only upon a 'mount' or 'open'. This
- * is the best way of combining speed and utility, I think.
- * People changing diskettes in the middle of an operation deserve
- * to loose :-)
- *
- * NOTE! Although currently this is only for floppies, the idea is
- * that any additional removable block-device will use this routine,
- * and that mount/open needn't know that floppies/whatever are
- * special.
- */
-void check_disk_change(dev_t dev)
-{
-	int i;
-	struct buffer_head * bh;
-
-	switch(MAJOR(dev)){
-	case FLOPPY_MAJOR:
-		if (!(bh = getblk(dev,0,1024)))
-			return;
-		i = floppy_change(bh);
-		brelse(bh);
-		break;
-
-#if defined(CONFIG_BLK_DEV_SD) && defined(CONFIG_SCSI)
-         case SCSI_DISK_MAJOR:
-		i = check_scsidisk_media_change(dev, 0);
-		break;
-#endif
-
-#if defined(CONFIG_BLK_DEV_SR) && defined(CONFIG_SCSI)
-	 case SCSI_CDROM_MAJOR:
-		i = check_cdrom_media_change(dev, 0);
-		break;
-#endif
-
-#if defined(CONFIG_CDU31A)
-         case CDU31A_CDROM_MAJOR:
-		i = check_cdu31a_media_change(dev, 0);
-		break;
-#endif
-
-#if defined(CONFIG_MCD)
-         case MITSUMI_CDROM_MAJOR:
-		i = check_mcd_media_change(dev, 0);
-		break;
-#endif
-
-         default:
-		return;
-	};
-
-	if (!i)	return;
-
-	printk("VFS: Disk change detected on device %d/%d\n",
-					MAJOR(dev), MINOR(dev));
-	for (i=0 ; i<NR_SUPER ; i++)
-		if (super_blocks[i].s_dev == dev)
-			put_super(super_blocks[i].s_dev);
-	invalidate_inodes(dev);
-	invalidate_buffers(dev);
-
-#if defined(CONFIG_BLK_DEV_SD) && defined(CONFIG_SCSI)
-/* This is trickier for a removable hardisk, because we have to invalidate
-   all of the partitions that lie on the disk. */
-	if (MAJOR(dev) == SCSI_DISK_MAJOR)
-		revalidate_scsidisk(dev, 0);
-#endif
 }
 
 #define _hashfn(dev,block) (((unsigned)(dev^block))%nr_hash)
@@ -511,7 +426,7 @@ static struct buffer_head * find_buffer(dev_t dev, int block, int size)
 
 /*
  * Why like this, I hear you say... The reason is race-conditions.
- * As we don't lock buffers (unless we are readint them, that is),
+ * As we don't lock buffers (unless we are reading them, that is),
  * something might happen to it while we sleep (ie a read-error
  * will force it bad). This shouldn't really happen currently, but
  * the code is ready.
@@ -568,7 +483,7 @@ void set_blocksize(dev_t dev, int size)
 			
 			wait_on_buffer(bh);
 			if (bh->b_dev == dev && bh->b_size != size) {
-				bh->b_uptodate = bh->b_dirt = 
+				bh->b_uptodate = bh->b_dirt = bh->b_req =
 					 bh->b_flushtime = 0;
 			};
 			remove_from_hash_queue(bh);
@@ -602,7 +517,7 @@ void refill_freelist(int size)
 	/* We are going to try and locate this much memory */
 	needed =bdf_prm.b_un.nrefill * size;  
 
-	while (nr_free_pages > min_free_pages && needed > 0 &&
+	while (nr_free_pages > min_free_pages*2 && needed > 0 &&
 	       grow_buffers(GFP_BUFFER, size)) {
 		needed -= PAGE_SIZE;
 	}
@@ -764,7 +679,7 @@ repeat0:
  * race-conditions. Most of the code is seldom used, (ie repeating),
  * so it should be much more efficient than it looks.
  *
- * The algoritm is changed: hopefully better, and an elusive bug removed.
+ * The algorithm is changed: hopefully better, and an elusive bug removed.
  *
  * 14.02.92: changed it to sync dirty buffers a bit: better performance
  * when the filesystem starts to get full of dirty blocks (I hope).
@@ -969,7 +884,7 @@ static void put_unused_buffer_head(struct buffer_head * bh)
 	struct wait_queue * wait;
 
 	wait = ((volatile struct buffer_head *) bh)->b_wait;
-	memset((void *) bh,0,sizeof(*bh));
+	memset(bh,0,sizeof(*bh));
 	((volatile struct buffer_head *) bh)->b_wait = wait;
 	bh->b_next_free = unused_list;
 	unused_list = bh;
@@ -1150,7 +1065,7 @@ static unsigned long try_to_load_aligned(unsigned long address,
 	buffermem += PAGE_SIZE;
 	bh->b_this_page = tmp;
 	mem_map[MAP_NR(address)]++;
-	buffer_pages[address >> PAGE_SHIFT] = bh;
+	buffer_pages[MAP_NR(address)] = bh;
 	read_buffers(arr,block);
 	while (block-- > 0)
 		brelse(arr[block]);
@@ -1190,11 +1105,6 @@ static inline unsigned long try_to_share_buffers(unsigned long address,
 	return try_to_load_aligned(address, dev, b, size);
 }
 
-#define COPYBLK(size,from,to) \
-__asm__ __volatile__("rep ; movsl": \
-	:"c" (((unsigned long) size) >> 2),"S" (from),"D" (to) \
-	:"cx","di","si")
-
 /*
  * bread_page reads four buffers into memory at the desired address. It's
  * a function of its own, as there is some speed to be got by reading them
@@ -1202,14 +1112,14 @@ __asm__ __volatile__("rep ; movsl": \
  * etc. This also allows us to optimize memory usage by sharing code pages
  * and filesystem buffers..
  */
-unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, int prot)
+unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, int no_share)
 {
 	struct buffer_head * bh[8];
 	unsigned long where;
 	int i, j;
 
-	if (!(prot & PAGE_RW)) {
-		where = try_to_share_buffers(address,dev,b,size);
+	if (!no_share) {
+		where = try_to_share_buffers(address, dev, b, size);
 		if (where)
 			return where;
 	}
@@ -1221,14 +1131,14 @@ unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, in
 	}
 	read_buffers(bh,i);
 	where = address;
- 	for (i=0, j=0; j<PAGE_SIZE ; i++, j += size,address += size) {
+ 	for (i=0, j=0; j<PAGE_SIZE ; i++, j += size, where += size) {
 		if (bh[i]) {
 			if (bh[i]->b_uptodate)
-				COPYBLK(size, (unsigned long) bh[i]->b_data,address);
+				memcpy((void *) where, bh[i]->b_data, size);
 			brelse(bh[i]);
 		}
 	}
-	return where;
+	return address;
 }
 
 /*
@@ -1279,7 +1189,7 @@ static int grow_buffers(int pri, int size)
 			break;
 	}
 	free_list[isize] = bh;
-	buffer_pages[page >> PAGE_SHIFT] = bh;
+	buffer_pages[MAP_NR(page)] = bh;
 	tmp->b_this_page = bh;
 	wake_up(&buffer_wait);
 	buffermem += PAGE_SIZE;
@@ -1323,7 +1233,7 @@ static int try_to_free(struct buffer_head * bh, struct buffer_head ** bhp)
 		put_unused_buffer_head(p);
 	} while (tmp != bh);
 	buffermem -= PAGE_SIZE;
-	buffer_pages[page >> PAGE_SHIFT] = NULL;
+	buffer_pages[MAP_NR(page)] = NULL;
 	free_page(page);
 	return !mem_map[MAP_NR(page)];
 }
@@ -1554,7 +1464,7 @@ static inline int try_to_reassign(struct buffer_head * bh, struct buffer_head **
  * pages for the buffer cache as much of the time as possible.
  * This way the other buffers on a particular page are likely
  * to be very near each other on the free list, and we will not
- * be expiring data prematurely.  For now we only canibalize buffers
+ * be expiring data prematurely.  For now we only cannibalize buffers
  * of the same size to keep the code simpler.
  */
 static int reassign_cluster(dev_t dev, 
@@ -1627,7 +1537,7 @@ static unsigned long try_to_generate_cluster(dev_t dev, int block, int size)
 			break;
 	}
 	buffermem += PAGE_SIZE;
-	buffer_pages[page >> PAGE_SHIFT] = bh;
+	buffer_pages[MAP_NR(page)] = bh;
 	bh->b_this_page = tmp;
 	while (nblock-- > 0)
 		brelse(arr[nblock]);
@@ -1661,7 +1571,7 @@ unsigned long generate_cluster(dev_t dev, int b[], int size)
 		 if(retval) return retval;
 	 };
 	
-	if (nr_free_pages > min_free_pages) 
+	if (nr_free_pages > min_free_pages*2) 
 		 return try_to_generate_cluster(dev, b[0], size);
 	else
 		 return reassign_cluster(dev, b[0], size);
@@ -1680,13 +1590,11 @@ void buffer_init(void)
         int isize = BUFSIZE_INDEX(BLOCK_SIZE);
 
 	if (high_memory >= 4*1024*1024) {
-		min_free_pages = 200;
 		if(high_memory >= 16*1024*1024)
 			 nr_hash = 16381;
 		else
 			 nr_hash = 4093;
 	} else {
-		min_free_pages = 20;
 		nr_hash = 997;
 	};
 	
@@ -1694,9 +1602,9 @@ void buffer_init(void)
 						     sizeof(struct buffer_head *));
 
 
-	buffer_pages = (struct buffer_head **) vmalloc((high_memory >>PAGE_SHIFT) * 
+	buffer_pages = (struct buffer_head **) vmalloc(MAP_NR(high_memory) * 
 						     sizeof(struct buffer_head *));
-	for (i = 0 ; i < high_memory >> PAGE_SHIFT ; i++)
+	for (i = 0 ; i < MAP_NR(high_memory) ; i++)
 		buffer_pages[i] = NULL;
 
 	for (i = 0 ; i < nr_hash ; i++)
@@ -1708,7 +1616,7 @@ void buffer_init(void)
 	return;
 }
 
-/* This is a simple kernel daemon, whose job it is to provide a dynamicly
+/* This is a simple kernel daemon, whose job it is to provide a dynamically
  * response to dirty buffers.  Once this process is activated, we write back
  * a limited number of buffers to the disks and then go back to sleep again.
  * In effect this is a process which never leaves kernel mode, and does not have
@@ -1734,7 +1642,7 @@ static void wakeup_bdflush(int wait)
 
 
 /* 
- * Here we attempt to write back old buffers.  We also try and flush indoes 
+ * Here we attempt to write back old buffers.  We also try and flush inodes 
  * and supers as well, since this function is essentially "update", and 
  * otherwise there would be no way of ensuring that these quantities ever 
  * get written back.  Ideally, we would have a timestamp on the inodes
@@ -1824,31 +1732,37 @@ asmlinkage int sys_bdflush(int func, int data)
 	int ncount;
 	struct buffer_head * bh, *next;
 
-	if(!suser()) return -EPERM;
+	if (!suser())
+		return -EPERM;
 
-	if(func == 1)
+	if (func == 1)
 		 return sync_old_buffers();
 
 	/* Basically func 0 means start, 1 means read param 1, 2 means write param 1, etc */
-	if(func >= 2){
+	if (func >= 2) {
 		i = (func-2) >> 1;
-		if (i < 0 || i >= N_PARAM) return -EINVAL;
+		if (i < 0 || i >= N_PARAM)
+			return -EINVAL;
 		if((func & 1) == 0) {
 			error = verify_area(VERIFY_WRITE, (void *) data, sizeof(int));
-			if(error) return error;
+			if (error)
+				return error;
 			put_fs_long(bdf_prm.data[i], data);
 			return 0;
 		};
-		if(data < bdflush_min[i] || data > bdflush_max[i]) return -EINVAL;
+		if (data < bdflush_min[i] || data > bdflush_max[i])
+			return -EINVAL;
 		bdf_prm.data[i] = data;
 		return 0;
 	};
 	
-	if(bdflush_running++) return -EBUSY; /* Only one copy of this running at one time */
+	if (bdflush_running)
+		return -EBUSY; /* Only one copy of this running at one time */
+	bdflush_running++;
 	
 	/* OK, from here on is the daemon */
 	
-	while(1==1){
+	for (;;) {
 #ifdef DEBUG
 		printk("bdflush() activated...");
 #endif
