@@ -1,137 +1,83 @@
 #
-# Makefile for the linux kernel.
+# Makefile for the FREAX-kernel.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
 # unless it's something special (ie not a .c file).
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.s:
-	$(CPP) -traditional $< -o $*.s
+AR	=gar
+AS	=gas
+LD	=gld
+LDFLAGS	=-s -x
+CC	=gcc
+CFLAGS	=-Wall -O -fstrength-reduce -fomit-frame-pointer -fcombine-regs \
+	-finline-functions -mstring-insns -nostdinc -I../include
+CPP	=gcc -E -nostdinc -I../include
+
 .c.s:
-	$(CC) $(CFLAGS) -S $<
+	$(CC) $(CFLAGS) \
+	-S -o $*.s $<
 .s.o:
 	$(AS) -c -o $*.o $<
 .c.o:
-	$(CC) $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) \
+	-c -o $*.o $<
 
-SUBDIRS	= chr_drv blk_drv math
-
-OBJS  = sched.o sys_call.o traps.o asm.o fork.o \
+OBJS  = sched.o system_call.o traps.o asm.o fork.o \
 	panic.o printk.o vsprintf.o sys.o exit.o \
-	signal.o mktime.o ptrace.o ioport.o itimer.o
-
-all: kernel.o subdirs
+	signal.o mktime.o
 
 kernel.o: $(OBJS)
 	$(LD) -r -o kernel.o $(OBJS)
 	sync
 
-subdirs: dummy
-	for i in $(SUBDIRS); do (cd $$i; $(MAKE)); done
-
-sys_call.s: sys_call.S
-
-sys_call.o: sys_call.s
-
-sched.o: sched.c
-	$(CC) $(CFLAGS) -fno-omit-frame-pointer -c $<
-
 clean:
-	rm -f core *.o *.a tmp_make sys_call.s
+	rm -f core *.o *.a tmp_make keyboard.s
 	for i in *.c;do rm -f `basename $$i .c`.s;done
-	for i in $(SUBDIRS); do (cd $$i; $(MAKE) clean); done
+	(cd chr_drv; make clean)
+	(cd blk_drv; make clean)
+	(cd math; make clean)
 
 dep:
 	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	for i in *.c;do $(CPP) -M $$i;done >> tmp_make
+	(for i in *.c;do echo -n `echo $$i | sed 's,\.c,\.s,'`" "; \
+		$(CPP) -M $$i;done) >> tmp_make
 	cp tmp_make Makefile
-	for i in $(SUBDIRS); do (cd $$i; $(MAKE) dep); done
-
-dummy:
+	(cd chr_drv; make dep)
+	(cd blk_drv; make dep)
 
 ### Dependencies:
-exit.o : exit.c /usr/src/linux/include/errno.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h /usr/src/linux/include/sys/wait.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/sys/param.h \
-  /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h \
-  /usr/src/linux/include/linux/tty.h /usr/src/linux/include/asm/system.h /usr/src/linux/include/termios.h \
-  /usr/src/linux/include/asm/segment.h 
-fork.o : fork.c /usr/src/linux/include/errno.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/sys/types.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h \
-  /usr/src/linux/include/signal.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h /usr/src/linux/include/asm/segment.h \
-  /usr/src/linux/include/asm/system.h 
-ioport.o : ioport.c /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h \
-  /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h /usr/src/linux/include/errno.h 
-itimer.o : itimer.c /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h \
-  /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h /usr/src/linux/include/linux/string.h \
-  /usr/src/linux/include/asm/segment.h /usr/src/linux/include/errno.h 
-mktime.o : mktime.c /usr/src/linux/include/time.h 
-panic.o : panic.c /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h 
-printk.o : printk.c /usr/src/linux/include/stdarg.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/errno.h /usr/src/linux/include/asm/segment.h /usr/src/linux/include/asm/system.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/sys/types.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h \
-  /usr/src/linux/include/signal.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h 
-ptrace.o : ptrace.c /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/kernel.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h /usr/src/linux/include/asm/segment.h /usr/src/linux/include/asm/system.h \
-  /usr/src/linux/include/errno.h /usr/src/linux/include/sys/ptrace.h 
-sched.o : sched.c /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h \
-  /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h /usr/src/linux/include/linux/timer.h /usr/src/linux/include/linux/sys.h \
-  /usr/src/linux/include/linux/fdreg.h /usr/src/linux/include/asm/system.h /usr/src/linux/include/asm/io.h \
-  /usr/src/linux/include/asm/segment.h /usr/src/linux/include/errno.h 
-signal.o : signal.c /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h \
-  /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h /usr/src/linux/include/asm/segment.h /usr/src/linux/include/sys/wait.h \
-  /usr/src/linux/include/sys/ptrace.h /usr/src/linux/include/errno.h 
-sys.o : sys.c /usr/src/linux/include/errno.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h \
-  /usr/src/linux/include/signal.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h /usr/src/linux/include/linux/tty.h \
-  /usr/src/linux/include/asm/system.h /usr/src/linux/include/termios.h /usr/src/linux/include/linux/config.h \
-  /usr/src/linux/include/linux/config_rel.h /usr/src/linux/include/linux/config_ver.h \
-  /usr/src/linux/include/linux/config.dist.h /usr/src/linux/include/asm/segment.h \
-  /usr/src/linux/include/sys/times.h /usr/src/linux/include/linux/utsname.h /usr/src/linux/include/linux/string.h 
-traps.o : traps.c /usr/src/linux/include/linux/string.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h \
-  /usr/src/linux/include/signal.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h /usr/src/linux/include/asm/system.h \
-  /usr/src/linux/include/asm/segment.h /usr/src/linux/include/asm/io.h /usr/src/linux/include/errno.h 
-vsprintf.o : vsprintf.c /usr/src/linux/include/stdarg.h /usr/src/linux/include/linux/string.h \
-  /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h 
+exit.s exit.o : exit.c ../include/errno.h ../include/signal.h \
+  ../include/sys/types.h ../include/sys/wait.h ../include/linux/sched.h \
+  ../include/linux/head.h ../include/linux/fs.h ../include/linux/mm.h \
+  ../include/linux/kernel.h ../include/linux/tty.h ../include/termios.h \
+  ../include/asm/segment.h 
+fork.s fork.o : fork.c ../include/errno.h ../include/linux/sched.h \
+  ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h \
+  ../include/linux/mm.h ../include/signal.h ../include/linux/kernel.h \
+  ../include/asm/segment.h ../include/asm/system.h 
+mktime.s mktime.o : mktime.c ../include/time.h 
+panic.s panic.o : panic.c ../include/linux/kernel.h ../include/linux/sched.h \
+  ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h \
+  ../include/linux/mm.h ../include/signal.h 
+printk.s printk.o : printk.c ../include/stdarg.h ../include/stddef.h \
+  ../include/linux/kernel.h 
+sched.s sched.o : sched.c ../include/linux/sched.h ../include/linux/head.h \
+  ../include/linux/fs.h ../include/sys/types.h ../include/linux/mm.h \
+  ../include/signal.h ../include/linux/kernel.h ../include/linux/sys.h \
+  ../include/linux/fdreg.h ../include/asm/system.h ../include/asm/io.h \
+  ../include/asm/segment.h 
+signal.s signal.o : signal.c ../include/linux/sched.h ../include/linux/head.h \
+  ../include/linux/fs.h ../include/sys/types.h ../include/linux/mm.h \
+  ../include/signal.h ../include/linux/kernel.h ../include/asm/segment.h 
+sys.s sys.o : sys.c ../include/errno.h ../include/linux/sched.h \
+  ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h \
+  ../include/linux/mm.h ../include/signal.h ../include/linux/tty.h \
+  ../include/termios.h ../include/linux/kernel.h ../include/asm/segment.h \
+  ../include/sys/times.h ../include/sys/utsname.h 
+traps.s traps.o : traps.c ../include/string.h ../include/linux/head.h \
+  ../include/linux/sched.h ../include/linux/fs.h ../include/sys/types.h \
+  ../include/linux/mm.h ../include/signal.h ../include/linux/kernel.h \
+  ../include/asm/system.h ../include/asm/segment.h ../include/asm/io.h 
+vsprintf.s vsprintf.o : vsprintf.c ../include/stdarg.h ../include/string.h 

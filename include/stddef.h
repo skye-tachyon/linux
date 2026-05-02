@@ -8,11 +8,12 @@ typedef long ptrdiff_t;
 
 #ifndef _SIZE_T
 #define _SIZE_T
-typedef unsigned int size_t;
+typedef unsigned long size_t;
 #endif
 
 #undef NULL
 #define NULL ((void *)0)
 
 #define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+
 #endif

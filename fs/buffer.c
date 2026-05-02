@@ -27,8 +27,8 @@
 #include <asm/io.h>
 
 extern int end;
-static struct buffer_head * start_buffer = (struct buffer_head *) &end;
-static struct buffer_head * hash_table[NR_HASH];
+struct buffer_head * start_buffer = (struct buffer_head *) &end;
+struct buffer_head * hash_table[NR_HASH];
 static struct buffer_head * free_list;
 static struct task_struct * buffer_wait = NULL;
 int NR_BUFFERS = 0;
@@ -41,46 +41,43 @@ static inline void wait_on_buffer(struct buffer_head * bh)
 	sti();
 }
 
-static void sync_buffers(int dev)
+int sys_sync(void)
 {
 	int i;
 	struct buffer_head * bh;
 
-	bh = free_list;
-	for (i = NR_BUFFERS*2 ; i-- > 0 ; bh = bh->b_next_free) {
-		if (bh->b_lock)
-			continue;
-		if (!bh->b_dirt)
-			continue;
-		ll_rw_block(WRITE,bh);
-	}
-}
-
-int sys_sync(void)
-{
-	int i;
-
-	for (i=0 ; i<NR_SUPER ; i++)
-		if (super_block[i].s_dev
-		    && super_block[i].s_op 
-		    && super_block[i].s_op->write_super 
-		    && super_block[i].s_dirt)
-			super_block[i].s_op->write_super(&super_block[i]);
 	sync_inodes();		/* write out inodes into buffers */
-	sync_buffers(0);
+	bh = start_buffer;
+	for (i=0 ; i<NR_BUFFERS ; i++,bh++) {
+		wait_on_buffer(bh);
+		if (bh->b_dirt)
+			ll_rw_block(WRITE,bh);
+	}
 	return 0;
 }
 
 int sync_dev(int dev)
 {
-	struct super_block * sb;
+	int i;
+	struct buffer_head * bh;
 
-	if (sb = get_super (dev))
-		if (sb->s_op && sb->s_op->write_super && sb->s_dirt)
-			sb->s_op->write_super (sb);
-	sync_buffers(dev);
+	bh = start_buffer;
+	for (i=0 ; i<NR_BUFFERS ; i++,bh++) {
+		if (bh->b_dev != dev)
+			continue;
+		wait_on_buffer(bh);
+		if (bh->b_dev == dev && bh->b_dirt)
+			ll_rw_block(WRITE,bh);
+	}
 	sync_inodes();
-	sync_buffers(dev);
+	bh = start_buffer;
+	for (i=0 ; i<NR_BUFFERS ; i++,bh++) {
+		if (bh->b_dev != dev)
+			continue;
+		wait_on_buffer(bh);
+		if (bh->b_dev == dev && bh->b_dirt)
+			ll_rw_block(WRITE,bh);
+	}
 	return 0;
 }
 
@@ -116,15 +113,10 @@ void inline invalidate_buffers(int dev)
 void check_disk_change(int dev)
 {
 	int i;
-	struct buffer_head * bh;
 
 	if (MAJOR(dev) != 2)
 		return;
-	if (!(bh = getblk(dev,0)))
-		return;
-	i = floppy_change(bh);
-	brelse(bh);
-	if (!i)
+	if (!floppy_change(dev & 0x03))
 		return;
 	for (i=0 ; i<NR_SUPER ; i++)
 		if (super_block[i].s_dev == dev)
@@ -136,61 +128,22 @@ void check_disk_change(int dev)
 #define _hashfn(dev,block) (((unsigned)(dev^block))%NR_HASH)
 #define hash(dev,block) hash_table[_hashfn(dev,block)]
 
-static inline void remove_from_hash_queue(struct buffer_head * bh)
+static inline void remove_from_queues(struct buffer_head * bh)
 {
+/* remove from hash-queue */
 	if (bh->b_next)
 		bh->b_next->b_prev = bh->b_prev;
 	if (bh->b_prev)
 		bh->b_prev->b_next = bh->b_next;
 	if (hash(bh->b_dev,bh->b_blocknr) == bh)
 		hash(bh->b_dev,bh->b_blocknr) = bh->b_next;
-	bh->b_next = bh->b_prev = NULL;
-}
-
-static inline void remove_from_free_list(struct buffer_head * bh)
-{
+/* remove from free list */
 	if (!(bh->b_prev_free) || !(bh->b_next_free))
 		panic("Free block list corrupted");
 	bh->b_prev_free->b_next_free = bh->b_next_free;
 	bh->b_next_free->b_prev_free = bh->b_prev_free;
 	if (free_list == bh)
 		free_list = bh->b_next_free;
-	bh->b_next_free = bh->b_prev_free = NULL;
-}
-
-static inline void remove_from_queues(struct buffer_head * bh)
-{
-	remove_from_hash_queue(bh);
-	remove_from_free_list(bh);
-}
-
-static inline void put_first_free(struct buffer_head * bh)
-{
-	if (!bh || (bh == free_list))
-		return;
-	remove_from_free_list(bh);
-/* add to front of free list */
-	bh->b_next_free = free_list;
-	bh->b_prev_free = free_list->b_prev_free;
-	free_list->b_prev_free->b_next_free = bh;
-	free_list->b_prev_free = bh;
-	free_list = bh;
-}
-
-static inline void put_last_free(struct buffer_head * bh)
-{
-	if (!bh)
-		return;
-	if (bh == free_list) {
-		free_list = bh->b_next_free;
-		return;
-	}
-	remove_from_free_list(bh);
-/* add to back of free list */
-	bh->b_next_free = free_list;
-	bh->b_prev_free = free_list->b_prev_free;
-	free_list->b_prev_free->b_next_free = bh;
-	free_list->b_prev_free = bh;
 }
 
 static inline void insert_into_queues(struct buffer_head * bh)
@@ -207,8 +160,7 @@ static inline void insert_into_queues(struct buffer_head * bh)
 		return;
 	bh->b_next = hash(bh->b_dev,bh->b_blocknr);
 	hash(bh->b_dev,bh->b_blocknr) = bh;
-	if (bh->b_next)
-		bh->b_next->b_prev = bh;
+	bh->b_next->b_prev = bh;
 }
 
 static struct buffer_head * find_buffer(int dev, int block)
@@ -237,10 +189,8 @@ struct buffer_head * get_hash_table(int dev, int block)
 			return NULL;
 		bh->b_count++;
 		wait_on_buffer(bh);
-		if (bh->b_dev == dev && bh->b_blocknr == block) {
-			put_last_free(bh);
+		if (bh->b_dev == dev && bh->b_blocknr == block)
 			return bh;
-		}
 		bh->b_count--;
 	}
 }
@@ -251,21 +201,17 @@ struct buffer_head * get_hash_table(int dev, int block)
  * so it should be much more efficient than it looks.
  *
  * The algoritm is changed: hopefully better, and an elusive bug removed.
- *
- * 14.02.92: changed it to sync dirty buffers a bit: better performance
- * when the filesystem starts to get full of dirty blocks (I hope).
  */
 #define BADNESS(bh) (((bh)->b_dirt<<1)+(bh)->b_lock)
 struct buffer_head * getblk(int dev,int block)
 {
-	struct buffer_head * bh, * tmp;
-	int buffers;
+	struct buffer_head * tmp, * bh;
 
 repeat:
 	if (bh = get_hash_table(dev,block))
 		return bh;
-	buffers = NR_BUFFERS;
-	for (tmp = free_list ; buffers-- > 0 ; tmp = tmp->b_next_free) {
+	tmp = free_list;
+	do {
 		if (tmp->b_count)
 			continue;
 		if (!bh || BADNESS(tmp)<BADNESS(bh)) {
@@ -273,12 +219,8 @@ repeat:
 			if (!BADNESS(tmp))
 				break;
 		}
-#if 0
-		if (tmp->b_dirt)
-			ll_rw_block(WRITEA,tmp);
-#endif
-	}
 /* and repeat until we find something good */
+	} while ((tmp = tmp->b_next_free) != free_list);
 	if (!bh) {
 		sleep_on(&buffer_wait);
 		goto repeat;
@@ -286,9 +228,11 @@ repeat:
 	wait_on_buffer(bh);
 	if (bh->b_count)
 		goto repeat;
-	if (bh->b_dirt) {
-		sync_buffers(bh->b_dev);
-		goto repeat;
+	while (bh->b_dirt) {
+		sync_dev(bh->b_dev);
+		wait_on_buffer(bh);
+		if (bh->b_count)
+			goto repeat;
 	}
 /* NOTE!! While we slept waiting for this block, somebody else might */
 /* already have added "this" block to the cache. check it */
@@ -389,7 +333,7 @@ struct buffer_head * breada(int dev,int first, ...)
 		tmp=getblk(dev,first);
 		if (tmp) {
 			if (!tmp->b_uptodate)
-				ll_rw_block(READA,tmp);
+				ll_rw_block(READA,bh);
 			tmp->b_count--;
 		}
 	}
@@ -412,10 +356,6 @@ void buffer_init(long buffer_end)
 	else
 		b = (void *) buffer_end;
 	while ( (b -= BLOCK_SIZE) >= ((void *) (h+1)) ) {
-		if (((unsigned long) (h+1)) > 0xA0000) {
-			printk("buffer-list doesn't fit in low meg - contact Linus\n");
-			break;
-		}
 		h->b_dev = 0;
 		h->b_dirt = 0;
 		h->b_count = 0;
@@ -425,7 +365,6 @@ void buffer_init(long buffer_end)
 		h->b_next = NULL;
 		h->b_prev = NULL;
 		h->b_data = (char *) b;
-		h->b_reqnext = NULL;
 		h->b_prev_free = h-1;
 		h->b_next_free = h+1;
 		h++;
@@ -438,5 +377,5 @@ void buffer_init(long buffer_end)
 	free_list->b_prev_free = h;
 	h->b_next_free = free_list;
 	for (i=0;i<NR_HASH;i++)
-		hash_table[i] = NULL;
+		hash_table[i]=NULL;
 }	

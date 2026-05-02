@@ -4,15 +4,14 @@
  *  (C) 1991  Linus Torvalds
  */
 
+#include <string.h>
 #include <errno.h>
-
-#include <asm/segment.h>
-
-#include <linux/stat.h>
-#include <linux/fcntl.h>
-#include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <asm/segment.h>
+
+#include <fcntl.h>
+#include <sys/stat.h>
 
 extern int sys_close(int fd);
 
@@ -36,10 +35,6 @@ static int dupfd(unsigned int fd, unsigned int arg)
 
 int sys_dup2(unsigned int oldfd, unsigned int newfd)
 {
-	if (oldfd >= NR_OPEN || !current->filp[oldfd])
-		return -EBADF;
-	if (newfd == oldfd)
-		return newfd;
 	sys_close(newfd);
 	return dupfd(oldfd,newfd);
 }
@@ -73,8 +68,8 @@ int sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			filp->f_flags |= arg & (O_APPEND | O_NONBLOCK);
 			return 0;
 		case F_GETLK:	case F_SETLK:	case F_SETLKW:
-			return -ENOSYS;
+			return -1;
 		default:
-			return -EINVAL;
+			return -1;
 	}
 }

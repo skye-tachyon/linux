@@ -13,22 +13,22 @@
 #include <asm/segment.h>
 #include <asm/io.h>
 
-extern int tty_read(unsigned minor,char * buf,int count,unsigned short flags);
+extern int tty_read(unsigned minor,char * buf,int count);
 extern int tty_write(unsigned minor,char * buf,int count);
 
-typedef (*crw_ptr)(int,unsigned,char *,int,off_t *,unsigned short);
+typedef (*crw_ptr)(int rw,unsigned minor,char * buf,int count,off_t * pos);
 
-static int rw_ttyx(int rw,unsigned minor,char * buf,int count,off_t * pos, unsigned short flags)
+static int rw_ttyx(int rw,unsigned minor,char * buf,int count,off_t * pos)
 {
-	return ((rw==READ)?tty_read(minor,buf,count,flags):
+	return ((rw==READ)?tty_read(minor,buf,count):
 		tty_write(minor,buf,count));
 }
 
-static int rw_tty(int rw,unsigned minor,char * buf,int count, off_t * pos, unsigned short flags)
+static int rw_tty(int rw,unsigned minor,char * buf,int count, off_t * pos)
 {
 	if (current->tty<0)
 		return -EPERM;
-	return rw_ttyx(rw,current->tty,buf,count,pos,flags);
+	return rw_ttyx(rw,current->tty,buf,count,pos);
 }
 
 static int rw_ram(int rw,char * buf, int count, off_t *pos)
@@ -43,21 +43,7 @@ static int rw_mem(int rw,char * buf, int count, off_t * pos)
 
 static int rw_kmem(int rw,char * buf, int count, off_t * pos)
 {
-	/* kmem by Damiano */
-	int i = *pos;	/* Current position where to read	*/
-
-	/* i can go from 0 to LOW_MEM (See include/linux/mm.h	*/
-	/* I am not shure about it but it doesn't mem fault :-)	*/
-	while ( (count-- > 0)  && (i <LOW_MEM) ) {
-		if (rw==READ)
-			put_fs_byte( *(char *)i ,buf++);
-		else
-			return (-EIO);
-		i++;
-	}
-	i -= *pos;		/* Count how many read or write		*/
-	*pos += i;		/* Update position			*/
-	return (i);		/* Return number read			*/
+	return -EIO;
 }
 
 static int rw_port(int rw,char * buf, int count, off_t * pos)
@@ -76,8 +62,7 @@ static int rw_port(int rw,char * buf, int count, off_t * pos)
 	return i;
 }
 
-static int rw_memory(int rw, unsigned minor, char * buf, int count,
-	off_t * pos, unsigned short flags)
+static int rw_memory(int rw, unsigned minor, char * buf, int count, off_t * pos)
 {
 	switch(minor) {
 		case 0:
@@ -107,30 +92,13 @@ static crw_ptr crw_table[]={
 	NULL,		/* /dev/lp */
 	NULL};		/* unnamed pipes */
 
-int char_read(struct inode * inode, struct file * filp, char * buf, int count)
+int rw_char(int rw,int dev, char * buf, int count, off_t * pos)
 {
-	unsigned int major,minor;
 	crw_ptr call_addr;
 
-	major = MAJOR(inode->i_rdev);
-	minor = MINOR(inode->i_rdev);
-	if (major >= NRDEVS)
+	if (MAJOR(dev)>=NRDEVS)
 		return -ENODEV;
-	if (!(call_addr = crw_table[major]))
+	if (!(call_addr=crw_table[MAJOR(dev)]))
 		return -ENODEV;
-	return call_addr(READ,minor,buf,count,&filp->f_pos,filp->f_flags);
-}
-
-int char_write(struct inode * inode, struct file * filp, char * buf, int count)
-{
-	unsigned int major,minor;
-	crw_ptr call_addr;
-
-	major = MAJOR(inode->i_rdev);
-	minor = MINOR(inode->i_rdev);
-	if (major >= NRDEVS)
-		return -ENODEV;
-	if (!(call_addr=crw_table[major]))
-		return -ENODEV;
-	return call_addr(WRITE,minor,buf,count,&filp->f_pos,filp->f_flags);
+	return call_addr(rw,MINOR(dev),buf,count,pos);
 }

@@ -11,4 +11,4 @@
 #define extern
 #define inline
 #define __LIBRARY__
-#include <linux/string.h>
+#include <string.h>

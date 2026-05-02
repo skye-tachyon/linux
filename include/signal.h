@@ -33,30 +33,8 @@ typedef unsigned int sigset_t;		/* 32 bits */
 #define SIGTTIN		21
 #define SIGTTOU		22
 
-/*
- * Most of these aren't used yet (and perhaps never will),
- * so they are commented out.
- */
-
-/*
-#define SIGIO		23
-#define SIGPOLL		SIGIO
-#define SIGXCPU		24
-#define SIGXFSZ		25
-*/
-
-#define SIGVTALRM	26
-#define SIGPROF		27
-
-#define SIGWINCH	28
-
-/*
-#define SIGLOST		29
-*/
-
 /* Ok, I haven't implemented sigactions, but trying to keep headers POSIX */
 #define SA_NOCLDSTOP	1
-#define SA_INTERRUPT	0x20000000
 #define SA_NOMASK	0x40000000
 #define SA_ONESHOT	0x80000000
 
@@ -66,12 +44,6 @@ typedef unsigned int sigset_t;		/* 32 bits */
 
 #define SIG_DFL		((void (*)(int))0)	/* default signal handling */
 #define SIG_IGN		((void (*)(int))1)	/* ignore signal */
-#define SIG_ERR		((void (*)(int))-1)	/* error return from signal */
-
-#ifdef notdef
-#define sigemptyset(mask) ((*(mask) = 0), 1)
-#define sigfillset(mask) ((*(mask) = ~0), 1)
-#endif
 
 struct sigaction {
 	void (*sa_handler)(int);
@@ -79,10 +51,6 @@ struct sigaction {
 	int sa_flags;
 	void (*sa_restorer)(void);
 };
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 void (*signal(int _sig, void (*_func)(int)))(int);
 int raise(int sig);
@@ -96,9 +64,5 @@ int sigpending(sigset_t *set);
 int sigprocmask(int how, sigset_t *set, sigset_t *oldset);
 int sigsuspend(sigset_t *sigmask);
 int sigaction(int sig, struct sigaction *act, struct sigaction *oldact);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* _SIGNAL_H */

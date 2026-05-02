@@ -10,7 +10,7 @@
  * to mainly kill the offending process (probably by giving it a signal,
  * but possibly by killing it outright if necessary).
  */
-#include <linux/string.h>
+#include <string.h>
 
 #include <linux/head.h>
 #include <linux/sched.h>
@@ -18,8 +18,6 @@
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <asm/io.h>
-#include <errno.h>
-
 
 #define get_seg_byte(seg,addr) ({ \
 register char __res; \
@@ -37,6 +35,8 @@ __res;})
 register unsigned short __res; \
 __asm__("mov %%fs,%%ax":"=a" (__res):); \
 __res;})
+
+int do_exit(long code);
 
 void page_exception(void);
 
@@ -59,7 +59,6 @@ void coprocessor_error(void);
 void reserved(void);
 void parallel_interrupt(void);
 void irq13(void);
-void alignment_check(void);
 
 static void die(char * str,long esp_ptr,long nr)
 {
@@ -67,12 +66,11 @@ static void die(char * str,long esp_ptr,long nr)
 	int i;
 
 	printk("%s: %04x\n\r",str,nr&0xffff);
-	printk("EIP:    %04x:%p\nEFLAGS: %p\n", 0xffff & esp[1],esp[0],esp[2]);
-	if ((0xffff & esp[1]) == 0xf)
-		printk("ESP:    %04x:%p\n",0xffff & esp[4],esp[3]);
+	printk("EIP:\t%04x:%p\nEFLAGS:\t%p\nESP:\t%04x:%p\n",
+		esp[1],esp[0],esp[2],esp[4],esp[3]);
 	printk("fs: %04x\n",_fs());
 	printk("base: %p, limit: %p\n",get_base(current->ldt[1]),get_limit(0x17));
-	if ((0xffff & esp[1]) == 0xf) {
+	if (esp[4] == 0x17) {
 		printk("Stack: ");
 		for (i=0;i<4;i++)
 			printk("%p ",get_seg_long(0x17,i+(long *)esp[3]));
@@ -83,10 +81,7 @@ static void die(char * str,long esp_ptr,long nr)
 	for(i=0;i<10;i++)
 		printk("%02x ",0xff & get_seg_byte(esp[1],(i+(char *)esp[0])));
 	printk("\n\r");
-	if ((0xffff & esp[1]) == 0xf)
-		send_sig(SIGSEGV, current, 0);
-	else
-		do_exit(SIGSEGV);
+	do_exit(11);		/* play segment exception */
 }
 
 void do_double_fault(long esp, long error_code)
@@ -99,19 +94,26 @@ void do_general_protection(long esp, long error_code)
 	die("general protection",esp,error_code);
 }
 
-void do_alignment_check(long esp, long error_code)
-{
-	die("alignment check",esp,error_code);
-}
-
 void do_divide_error(long esp, long error_code)
 {
 	die("divide error",esp,error_code);
 }
 
-void do_int3(long esp, long error_code)
+void do_int3(long * esp, long error_code,
+		long fs,long es,long ds,
+		long ebp,long esi,long edi,
+		long edx,long ecx,long ebx,long eax)
 {
-	send_sig(SIGTRAP, current, 0);
+	int tr;
+
+	__asm__("str %%ax":"=a" (tr):"0" (0));
+	printk("eax\t\tebx\t\tecx\t\tedx\n\r%8x\t%8x\t%8x\t%8x\n\r",
+		eax,ebx,ecx,edx);
+	printk("esi\t\tedi\t\tebp\t\tesp\n\r%8x\t%8x\t%8x\t%8x\n\r",
+		esi,edi,ebp,(long) esp);
+	printk("\n\rds\tes\tfs\ttr\n\r%4x\t%4x\t%4x\t%4x\n\r",
+		ds,es,fs,tr);
+	printk("EIP: %8x   CS: %4x  EFLAGS: %8x\n\r",esp[0],esp[1],esp[2]);
 }
 
 void do_nmi(long esp, long error_code)
@@ -121,7 +123,7 @@ void do_nmi(long esp, long error_code)
 
 void do_debug(long esp, long error_code)
 {
-	send_sig(SIGTRAP, current, 0);
+	die("debug",esp,error_code);
 }
 
 void do_overflow(long esp, long error_code)
@@ -197,8 +199,7 @@ void trap_init(void)
 	set_trap_gate(14,&page_fault);
 	set_trap_gate(15,&reserved);
 	set_trap_gate(16,&coprocessor_error);
-	set_trap_gate(17,&alignment_check);
-	for (i=18;i<48;i++)
+	for (i=17;i<48;i++)
 		set_trap_gate(i,&reserved);
 	set_trap_gate(45,&irq13);
 	outb_p(inb_p(0x21)&0xfb,0x21);

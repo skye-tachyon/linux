@@ -1,7 +1,7 @@
 #ifndef _TERMIOS_H
 #define _TERMIOS_H
 
-#include <sys/types.h>
+#define TTY_BUF_SIZE 1024
 
 /* 0x54 is just a magic number to make these relatively uniqe ('T') */
 
@@ -31,12 +31,7 @@
 #define TIOCMSET	0x5418
 #define TIOCGSOFTCAR	0x5419
 #define TIOCSSOFTCAR	0x541A
-#define FIONREAD	0x541B
-#define TIOCINQ		FIONREAD
-#define TIOCLINUX	0x541C
-#define TIOCCONS	0x541D
-#define TIOCGSERIAL	0x541E
-#define TIOCSSERIAL	0x541F
+#define TIOCINQ		0x541B
 
 struct winsize {
 	unsigned short ws_row;
@@ -57,12 +52,12 @@ struct termio {
 
 #define NCCS 17
 struct termios {
-	tcflag_t c_iflag;		/* input mode flags */
-	tcflag_t c_oflag;		/* output mode flags */
-	tcflag_t c_cflag;		/* control mode flags */
-	tcflag_t c_lflag;		/* local mode flags */
-	cc_t c_line;			/* line discipline */
-	cc_t c_cc[NCCS];		/* control characters */
+	unsigned long c_iflag;		/* input mode flags */
+	unsigned long c_oflag;		/* output mode flags */
+	unsigned long c_cflag;		/* control mode flags */
+	unsigned long c_lflag;		/* local mode flags */
+	unsigned char c_line;		/* line discipline */
+	unsigned char c_cc[NCCS];	/* control characters */
 };
 
 /* c_cc characters */
@@ -160,12 +155,15 @@ struct termios {
 #define   CS8	0000060
 #define CSTOPB	0000100
 #define CREAD	0000200
-#define PARENB	0000400
-#define PARODD	0001000
+#define CPARENB	0000400
+#define CPARODD	0001000
 #define HUPCL	0002000
 #define CLOCAL	0004000
 #define CIBAUD	03600000		/* input baud rate (not used) */
 #define CRTSCTS	020000000000		/* flow control */
+
+#define PARENB CPARENB
+#define PARODD CPARODD
 
 /* c_lflag bits */
 #define ISIG	0000001
@@ -213,9 +211,7 @@ struct termios {
 #define	TCSADRAIN	1
 #define	TCSAFLUSH	2
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+typedef int speed_t;
 
 extern speed_t cfgetispeed(struct termios *termios_p);
 extern speed_t cfgetospeed(struct termios *termios_p);
@@ -228,9 +224,5 @@ extern int tcgetattr(int fildes, struct termios *termios_p);
 extern int tcsendbreak(int fildes, int duration);
 extern int tcsetattr(int fildes, int optional_actions,
 	struct termios *termios_p);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

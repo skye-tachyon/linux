@@ -11,13 +11,13 @@
  * management can be a bitch. See 'mm/mm.c': 'copy_page_tables()'
  */
 #include <errno.h>
-#include <stddef.h>
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
-#include <linux/mm.h>
 #include <asm/segment.h>
 #include <asm/system.h>
+
+extern void write_verify(unsigned long address);
 
 long last_pid=0;
 
@@ -45,15 +45,11 @@ int copy_mem(int nr,struct task_struct * p)
 	data_limit=get_limit(0x17);
 	old_code_base = get_base(current->ldt[1]);
 	old_data_base = get_base(current->ldt[2]);
-	if (old_data_base != old_code_base) {
-		printk("ldt[0]: %08x %08x\n",current->ldt[0].a,current->ldt[0].b);
-		printk("ldt[1]: %08x %08x\n",current->ldt[1].a,current->ldt[1].b);
-		printk("ldt[2]: %08x %08x\n",current->ldt[2].a,current->ldt[2].b);
+	if (old_data_base != old_code_base)
 		panic("We don't support separate I&D");
-	}
 	if (data_limit < code_limit)
 		panic("Bad data_limit");
-	new_data_base = new_code_base = nr * TASK_SIZE;
+	new_data_base = new_code_base = nr * 0x4000000;
 	p->start_code = new_code_base;
 	set_base(p->ldt[1],new_code_base);
 	set_base(p->ldt[2],new_data_base);
@@ -64,62 +60,34 @@ int copy_mem(int nr,struct task_struct * p)
 	return 0;
 }
 
-static int find_empty_process(void)
-{
-	int i;
-
-	repeat:
-		if ((++last_pid) & 0xffff0000)
-			last_pid=1;
-		for(i=0 ; i<NR_TASKS ; i++)
-			if (task[i] && ((task[i]->pid == last_pid) ||
-				        (task[i]->pgrp == last_pid)))
-				goto repeat;
-	for(i=1 ; i<NR_TASKS ; i++)
-		if (!task[i])
-			return i;
-	return -EAGAIN;
-}
-
 /*
  *  Ok, this is the main fork-routine. It copies the system process
  * information (task[nr]) and sets up the necessary registers. It
  * also copies the data segment in it's entirety.
  */
-int sys_fork(long ebx,long ecx,long edx,
-		long esi, long edi, long ebp, long eax, long ds,
-		long es, long fs, long gs, long orig_eax,
+int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
+		long ebx,long ecx,long edx,
+		long fs,long es,long ds,
 		long eip,long cs,long eflags,long esp,long ss)
 {
 	struct task_struct *p;
-	int i,nr;
+	int i;
 	struct file *f;
 
 	p = (struct task_struct *) get_free_page();
 	if (!p)
 		return -EAGAIN;
-	nr = find_empty_process();
-	if (nr < 0) {
-		free_page((unsigned long) p);
-		return nr;
-	}
 	task[nr] = p;
 	*p = *current;	/* NOTE! this doesn't copy the supervisor stack */
 	p->state = TASK_UNINTERRUPTIBLE;
-	p->flags &= ~PF_PTRACED;
 	p->pid = last_pid;
-	p->p_pptr = p->p_opptr = current;
-	p->p_cptr = NULL;
-	SET_LINKS(p);
+	p->father = current->pid;
 	p->counter = p->priority;
 	p->signal = 0;
-	p->it_real_value = p->it_virt_value = p->it_prof_value = 0;
-	p->it_real_incr = p->it_virt_incr = p->it_prof_incr = 0;
+	p->alarm = 0;
 	p->leader = 0;		/* process leadership doesn't inherit */
 	p->utime = p->stime = 0;
 	p->cutime = p->cstime = 0;
-	p->min_flt = p->maj_flt = 0;
-	p->cmin_flt = p->cmaj_flt = 0;
 	p->start_time = jiffies;
 	p->tss.back_link = 0;
 	p->tss.esp0 = PAGE_SIZE + (long) p;
@@ -141,14 +109,11 @@ int sys_fork(long ebx,long ecx,long edx,
 	p->tss.fs = fs & 0xffff;
 	p->tss.gs = gs & 0xffff;
 	p->tss.ldt = _LDT(nr);
-	p->tss.trace_bitmap = offsetof(struct tss_struct,io_bitmap) << 16;
-	for (i = 0; i<IO_BITMAP_SIZE ; i++)
-		p->tss.io_bitmap[i] = ~0;
+	p->tss.trace_bitmap = 0x80000000;
 	if (last_task_used_math == current)
-		__asm__("clts ; fnsave %0 ; frstor %0"::"m" (p->tss.i387));
+		__asm__("clts ; fnsave %0"::"m" (p->tss.i387));
 	if (copy_mem(nr,p)) {
 		task[nr] = NULL;
-		REMOVE_LINKS(p);
 		free_page((long) p);
 		return -EAGAIN;
 	}
@@ -161,11 +126,22 @@ int sys_fork(long ebx,long ecx,long edx,
 		current->root->i_count++;
 	if (current->executable)
 		current->executable->i_count++;
-	for (i=0; i < current->numlibraries ; i++)
-		if (current->libraries[i].library)
-			current->libraries[i].library->i_count++;
 	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));
 	set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,&(p->ldt));
 	p->state = TASK_RUNNING;	/* do this last, just in case */
-	return p->pid;
+	return last_pid;
+}
+
+int find_empty_process(void)
+{
+	int i;
+
+	repeat:
+		if ((++last_pid)<0) last_pid=1;
+		for(i=0 ; i<NR_TASKS ; i++)
+			if (task[i] && task[i]->pid == last_pid) goto repeat;
+	for(i=1 ; i<NR_TASKS ; i++)
+		if (!task[i])
+			return i;
+	return -EAGAIN;
 }
